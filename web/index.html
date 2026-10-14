@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PantauAkun — Monitoring Performa Multi-Akun</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23101820'/%3E%3Ctext x='16' y='23' font-size='19' text-anchor='middle' fill='%2326c6a0'%3E%E2%97%88%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <button class="nav-toggle" id="navToggle" aria-label="Buka menu" aria-expanded="false">☰</button>
+  <div class="nav-backdrop" id="navBackdrop" hidden></div>
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-mark">◈</div>
+      <div>
+        <div class="brand-name">PantauAkun</div>
+        <div class="brand-sub">Monitoring multi-akun</div>
+      </div>
+    </div>
+    <nav>
+      <button class="nav-btn active" data-view="dashboard">
+        <span class="ico">▦</span> Dashboard
+      </button>
+      <button class="nav-btn" data-view="input">
+        <span class="ico">⎘</span> Input Link
+        <span class="nav-hint">tempel link postingan</span>
+      </button>
+      <button class="nav-btn" data-view="akun">
+        <span class="ico">◉</span> Akun
+      </button>
+      <button class="nav-btn" data-view="data">
+        <span class="ico">␥</span> Kelola Data
+        <span class="nav-hint">hapus / reset scrape</span>
+      </button>
+      <button class="nav-btn" data-view="pengaturan">
+        <span class="ico">⚙</span> Pengaturan
+      </button>
+    </nav>
+    <div class="side-foot">
+      <div class="counts" id="sideCounts"></div>
+    </div>
+  </aside>
+
+  <main>
+    <header class="topbar">
+      <div class="week-picker">
+        <label>Periode
+          <input type="date" id="sejak"> <span class="dash">–</span>
+          <input type="date" id="sampai">
+        </label>
+        <button class="btn ghost" id="btnPekanIni" title="Set ke pekan berjalan (Senin–Minggu)">Pekan ini</button>
+      </div>
+      <div class="top-actions">
+        <select id="filterPlatform">
+          <option value="">Semua platform</option>
+          <option value="tiktok">TikTok</option>
+          <option value="instagram">Instagram</option>
+          <option value="threads">Threads</option>
+          <option value="facebook">Facebook</option>
+        </select>
+        <select id="exportFormat" title="Format export">
+          <option value="xlsx">Excel (.xlsx)</option>
+          <option value="csv">CSV (.csv)</option>
+        </select>
+        <button class="btn primary" id="btnExport">⭳ Export</button>
+        <button class="btn ghost" id="btnRefresh" title="Muat ulang data sekarang">⟳</button>
+      </div>
+    </header>
+
+    <!-- KELOLA DATA -->
+    <section class="view" id="view-data">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Kelola data scrape</h2>
+            <p class="muted">Hapus data hasil scraping (postingan + metrik).
+            <b>Daftar akun tidak pernah ikut terhapus</b> — jadi tidak perlu
+            import Excel ulang setelah reset.</p>
+          </div>
+        </div>
+        <div id="dataStat" class="statline"></div>
+        <div class="row gap" style="margin-top:12px">
+          <button class="btn" data-scope="platform">Hapus per platform…</button>
+          <button class="btn" data-scope="periode">Hapus per periode…</button>
+          <button class="btn danger" data-scope="all">⟲ Reset semua data scrape</button>
+          <button class="btn ghost" id="btnBackup">⭳ Backup database</button>
+        </div>
+        <p class="muted small" style="margin:10px 0 0">
+          Hapus &amp; Reset otomatis membuat backup di folder <code>data/</code> dulu.
+          Hapus juga bisa per akun (halaman <b>Akun</b> → detail → “Hapus semua
+          postingan akun ini”) atau per Posting (tombol <code>✕</code> di tabel detail).
+        </p>
+      </div>
+    </section>
+
+    <!-- DASHBOARD -->
+    <section class="view active" id="view-dashboard">
+      <div class="stats" id="stats"></div>
+
+      <div class="card" id="trenBox" hidden>
+        <div class="card-head" style="margin-bottom:6px">
+          <h2 style="font-size:14px">Tren interaksi harian</h2>
+          <span class="muted small">klik “Bandingkan” untuk angka naik/turun</span>
+        </div>
+        <div id="trenSvg" class="tren"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Performa per akun</h2>
+          <div class="row gap">
+            <input type="search" id="cari" placeholder="Cari username / kode…">
+            <button class="btn ghost" id="btnBanding">⇅ Bandingkan</button>
+          </div>
+        </div>
+        <p class="muted small" id="prevInfo" hidden style="margin:0 0 8px"></p>
+        <div class="table-wrap">
+          <table id="tblDash">
+            <thead><tr>
+              <th>Kode</th><th>Platform</th><th>Username</th>
+              <th class="num">Views</th><th class="num">Komen</th>
+              <th class="num">Share</th><th class="num">Like</th>
+              <th class="num">Repost</th><th class="num">Interaksi</th>
+              <th class="num">Post</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="empty" id="dashEmpty" hidden>Belum ada data di periode ini. Tambah lewat <b>Input Link</b> atau tarik otomatis Threads.</div>
+        <p class="muted small">“—” = metrik tidak diekspos publik oleh platformnya (bukan nol). TikTok: tanpa Repost · Instagram: tanpa Share/Repost · Threads: tanpa Views/Share.</p>
+      </div>
+    </section>
+
+    <!-- INPUT LINK -->
+    <section class="view" id="view-input">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Input link postingan</h2>
+            <p class="muted">Tempel link postingan (satu per baris, boleh campur TikTok / IG / Threads).
+            Saya scrape satu-satu, deteksi akunnya otomatis, lalu kelompokkan per akun.</p>
+          </div>
+        </div>
+        <textarea id="taLinks" rows="6" placeholder="https://www.tiktok.com/@user/video/123…&#10;https://www.instagram.com/reel/abc…&#10;https://www.threads.com/share/xyz…"></textarea>
+        <div class="row">
+          <button class="btn primary" id="btnProses">🔍 Scrape & kelompokkan</button>
+          <span class="muted small" id="prosesInfo"></span>
+        </div>
+        <div class="row">
+          <input type="file" id="fileLinks" accept=".xlsx,.xlsm,.csv,.txt" style="font-size:12px">
+          <button class="btn" id="btnImportLinks">📥 Import link dari Excel</button>
+          <span class="muted small">Otomatis mendeteksi semua link postingan di semua sheet & sel (termasuk hyperlink). Format: .xlsx / .csv.</span>
+        </div>
+        <p class="muted small" style="margin:10px 0 0">Batas platform — TikTok: tanpa Repost · Instagram: tanpa Share/Repost · Threads: tanpa Views/Share · <b>Facebook: butuh cookie sesi</b> (isi di <b>Pengaturan</b>), dan tidak punya Views sama sekali.</p>
+        <p class="muted small" style="margin:4px 0 0">Import link otomatis mengenali <b>Facebook</b> juga: <code>/share/…</code>, <code>/posts/…</code>, <code>/watch</code>, <code>/reel</code>, <code>/videos/…</code>, <code>/photo</code>, <code>fb.watch</code>. Link profil &amp; grup dilewati karena bukan postingan.</p>
+      </div>
+      <div class="card" id="hasilCard" hidden>
+        <div class="card-head">
+          <h2>Hasil scrape <span class="pill" id="hasilCount"></span></h2>
+          <div class="row" style="margin:0">
+            <button class="btn" id="btnRetry" hidden>↻ Ulangi yang gagal</button>
+            <button class="btn primary" id="btnSimpan">💾 Simpan ke database</button>
+          </div>
+        </div>
+        <div class="warnbox" id="authWarn" hidden>
+          <b>⚠ Sesi login bermasalah</b>
+          <span id="authWarnTxt"></span>
+          <a class="btn small" href="#" data-goto="pengaturan">Buka Pengaturan</a>
+        </div>
+        <div class="progress" id="jobProg" hidden>
+          <div class="bar"><div id="jobBar"></div></div>
+          <div class="muted small" id="jobTxt" style="margin-top:6px"></div>
+        </div>
+        <!-- AUDIT: verifikasi tanggal & anomali -->
+        <div class="auditbox" id="auditBox" hidden></div>
+
+        <!-- sortir, cari, filter tanggal -->
+        <div class="row gap hasil-tools">
+          <input type="search" id="cariHasil" placeholder="🔍 Cari author / link / kode akun…">
+          <span class="muted small">Tanggal</span>
+          <input type="date" id="hasilDari" title="Dari tanggal">
+          <span class="dash">–</span>
+          <input type="date" id="hasilSampai" title="Sampai tanggal">
+          <select id="filterAudit" title="Filter status audit">
+            <option value="">Semua status audit</option>
+            <option value="ok">✅ Tanggal terverifikasi</option>
+            <option value="wajar">⚠️ Tanggal hanya tingkat hari (Instagram)</option>
+            <option value="periksa">❌ Perlu diperiksa</option>
+          </select>
+          <select id="filterHasilPlatform">
+            <option value="">Semua platform</option>
+            <option value="tiktok">TikTok</option>
+            <option value="instagram">Instagram</option>
+            <option value="threads">Threads</option>
+            <option value="facebook">Facebook</option>
+          </select>
+          <button class="btn ghost" id="btnResetFilterHasil">Reset filter</button>
+          <span class="muted small" id="hasilFilterInfo"></span>
+        </div>
+
+        <div class="table-wrap" style="margin-top:10px">
+          <table id="tblHasil">
+            <thead><tr>
+              <th class="sortable" data-sort="url">Link</th>
+              <th class="sortable" data-sort="platform">Platform</th>
+              <th class="sortable" data-sort="author">Author</th>
+              <th class="sortable" data-sort="posted_at">Tanggal</th>
+              <th class="sortable num" data-sort="views">Views</th>
+              <th class="sortable num" data-sort="like">Like</th>
+              <th class="sortable num" data-sort="komen">Komen</th>
+              <th class="sortable num" data-sort="share">Share</th>
+              <th class="sortable num" data-sort="repost">Repost</th>
+              <th>Akun tujuan</th><th>Status</th><th>Audit</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="row gap" id="hasilPager" hidden
+             style="margin-top:10px; justify-content:center"></div>
+      </div>
+    </section>
+
+    <!-- AKUN -->
+    <section class="view" id="view-akun">
+      <div class="card">
+        <div class="card-head">
+          <h2>Daftar akun <span class="pill" id="akunCount"></span></h2>
+          <div class="row">
+            <input type="file" id="fileExcel" accept=".xlsx,.xlsm,.csv" style="font-size:12px">
+            <button class="btn" id="btnImportExcel">⇪ Import dari Excel PEMANTAUAN</button>
+            <span class="muted small">.xlsx / .csv — sheet per platform, kolom: No, Username, Link Profile.</span>
+          </div>
+        </div>
+        <form id="formAkun" class="form-inline">
+          <input name="kode" placeholder="Kode (mis. 143)" size="10">
+          <select name="platform">
+            <option value="tiktok">TikTok</option>
+            <option value="instagram">Instagram</option>
+            <option value="threads">Threads</option>
+            <option value="facebook">Facebook</option>
+          </select>
+          <input name="username" placeholder="username (tanpa @)" required>
+          <input name="link_profile" placeholder="link profil (opsional)" size="30">
+          <button class="btn primary" type="submit">+ Tambah</button>
+        </form>
+
+        <!-- toolbar: cari, filter platform, hapus massal -->
+        <div class="row gap" style="margin-top:12px; flex-wrap:wrap; align-items:center">
+          <input type="search" id="cariAkun" placeholder="🔍 Cari kode / username…" style="min-width:220px">
+          <select id="filterAkunPlatform">
+            <option value="">Semua platform</option>
+            <option value="tiktok">TikTok</option>
+            <option value="instagram">Instagram</option>
+            <option value="threads">Threads</option>
+            <option value="facebook">Facebook</option>
+          </select>
+          <button class="btn ghost" id="btnPilihSemua">Pilih semua (terfilter)</button>
+          <button class="btn" id="btnHapusTerpilih" disabled>🗑 Hapus terpilih (<span id="jmlTerpilih">0</span>)</button>
+          <span style="flex:1"></span>
+          <button class="btn danger" id="btnHapusSemuaAkun">⟲ Hapus semua akun</button>
+        </div>
+        <p class="muted small" style="margin:8px 0 0">
+          ⚠ Menghapus akun juga menghapus <b>semua postingan + metrik</b> miliknya.
+          Backup otomatis dibuat di folder <code>data/</code> sebelum penghapusan besar.
+        </p>
+
+        <div class="table-wrap">
+          <table id="tblAkun">
+            <thead><tr>
+              <th style="width:28px"><input type="checkbox" id="chkSemua" title="Pilih semua yang tampil"></th>
+              <th>Kode</th><th>Platform</th><th>Username</th>
+              <th class="num">Post</th><th>Link profil</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card" id="detailAkun" hidden>
+        <div class="card-head">
+          <h2 id="detailTitle"></h2>
+          <div class="row" style="margin:0">
+            <button class="btn danger" id="btnHapusPostinganAkun">🗑 Hapus semua postingan akun ini</button>
+            <button class="btn ghost" id="btnTutupDetail">Tutup</button>
+          </div>
+        </div>
+        <div class="table-wrap"><table id="tblPosts">
+          <thead><tr><th>Tanggal</th><th>Link</th><th class="num">Views</th><th class="num">Like</th><th class="num">Komen</th><th class="num">Share</th><th class="num">Repost</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+      <div class="card" id="detailPost" hidden>
+        <div class="card-head">
+          <h2>Riwayat metrik</h2>
+          <button class="btn ghost" id="btnTutupPost">Tutup</button>
+        </div>
+        <div id="postMeta" class="muted small"></div>
+        <div class="table-wrap"><table id="tblHist">
+          <thead><tr><th>Waktu scrape</th><th class="num">Views</th><th class="num">Δ Views</th><th class="num">Like</th><th class="num">Komen</th><th class="num">Share</th><th class="num">Repost</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <!-- PENGATURAN -->
+    <section class="view" id="view-pengaturan">
+      <div class="card narrow">
+        <h2>Pengaturan</h2>
+        <label class="field">Jeda antar request scrape (detik)
+          <input type="number" id="setDelay" min="1" max="10" step="1">
+          <span class="muted small">Makin kecil makin cepat, makin besar makin aman dari blokir.</span>
+        </label>
+        <button class="btn primary" id="btnSimpanSet">Simpan</button>
+        <hr>
+        <h2>Kecepatan scrape paralel</h2>
+        <p class="muted">Jumlah posting yang diproses bersamaan <b>per platform</b>.
+        Jeda antar request tetap 2 detik per platform — yang berubah hanya berapa
+        yang "mengambang" sambil menunggu. Diukur dengan link asli:</p>
+        <div class="form-inline" style="margin-bottom:8px">
+          <label class="field" style="margin:0">Threads
+            <select id="lw_threads"><option>1</option><option>2</option><option>3</option><option>4</option></select>
+          </label>
+          <label class="field" style="margin:0">Instagram
+            <select id="lw_instagram"><option>1</option><option>2</option><option>3</option><option>4</option></select>
+          </label>
+          <label class="field" style="margin:0">Facebook
+            <select id="lw_facebook"><option>1</option><option>2</option><option>3</option><option>4</option></select>
+          </label>
+          <label class="field" style="margin:0">TikTok
+            <input value="1" disabled size="2" style="width:44px">
+          </label>
+        </div>
+        <p class="muted small">
+          ⚠ TikTok <b>tidak bisa</b> dinaikkan — diuji 3 worker menurunkan
+          keberhasilan 50% → 25% karena captcha anti-bot. Naikkan Threads/IG/FB
+          hanya kalau tidak adacaptcha; kalau muncul, turunkan lagi ke 1.
+          <br>Acuan: Threads 1→3 worker = 2× lebih cepat (9,2 → 22,0 link/menit).
+        </p>
+        <button class="btn primary" id="btnSimpanLane" style="margin-top:8px">Simpan kecepatan</button>
+        <hr>
+        <h2>Sesi login <span class="muted small">(opsional — 1 akun admin: Instagram / Threads / Facebook)</span></h2>
+        <p class="muted">Login di <b>browser kamu sendiri</b>, export cookie (ekstensi “Get cookies.txt” / “Copy Cookies”), lalu tempel/upload di bawah. Tool <b>tidak pernah meminta password</b> dan cookie hanya tersimpan di database lokal ini.</p>
+        <div class="sess-grid" id="sessGrid"></div>
+        <details class="muted small" style="margin-top:8px">
+          <summary><b>Cara export cookie</b></summary>
+          <ol>
+            <li>Login ke platformnya di Chrome/Firefox seperti biasa.</li>
+            <li>Pasang ekstensi “Get cookies.txt LOCALLY” → klik → <b>Export</b> → simpan file <code>.txt</code>.</li>
+            <li>Di kartu platform bawah, klik <b>📁 Upload cookies.txt</b> lalu <b>Simpan</b>, atau tempel isi file ke kolom teks.</li>
+            <li>Klik <b>Tes sesi</b> — kalau valid, fitur terkunci ikut kebuka. Cookie kedaluwarsa? Export ulang &amp; simpan lagi.</li>
+          </ol>
+        </details>
+        <hr>
+        <h2>Tarik otomatis per akun</h2>
+        <p class="muted">Threads jalan tanpa login. Instagram <b>butuh sesi login</b> (lihat atas) — tanpa sesi, pakai <b>Input Link</b>. TikTok tetap via <b>Input Link</b> (daftar video per akun tidak bisa diambil via web tanpa browser).</p>
+        <div class="row gap">
+          <button class="btn" id="btnThreads">⇪ Tarik semua akun Threads</button>
+        </div>
+        <div class="row gap" style="margin-top:8px">
+          <button class="btn" id="btnIgBulk">⇪ Tarik semua akun Instagram</button>
+          <label class="muted small">maks <input type="number" id="bulkLimit" value="10" min="1" max="30" style="width:52px"> postingan/akun</label>
+        </div>
+        <p class="muted small" id="bulkNote"></p>
+        <div class="progress" id="jobProgSet" hidden>
+          <div class="bar"><div id="jobBarSet"></div></div>
+          <span id="jobTxtSet" class="muted small"></span>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
