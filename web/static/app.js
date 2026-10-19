@@ -42,7 +42,7 @@ $$(".nav-btn").forEach((b) =>
     $("#view-" + b.dataset.view).classList.add("active");
     if (b.dataset.view === "dashboard") loadDashboard();
     if (b.dataset.view === "akun") loadAkun();
-    if (b.dataset.view === "follow") loadFollow();
+    if (b.dataset.view === "follow") { loadFollow(); loadScanSources(); loadScanResult(); }
     if (b.dataset.view === "pengaturan") loadSettings();
     if (b.dataset.view === "data") loadDataStat();
     closeNav();
@@ -1010,6 +1010,7 @@ async function loadSettings() {
     if (el) el.value = s.lane_workers?.[p] || "3";
   }
   await loadSessions();
+  await loadAccSessions();
 }
 $("#btnSimpanLane")?.addEventListener("click", async () => {
   const body = {};
@@ -1273,6 +1274,200 @@ $("#btnCekFollow")?.addEventListener("click", async () => {
     btn.disabled = false;
     toast("❌ " + e.message);
   }
+});
+
+/* ---------- cek follow bebas: akun sumber dipilih → target diketik ---------- */
+let SCAN = [];
+const SCAN_LABEL = {
+  follow: ["ok", "✅ Sudah follow"],
+  tidak: ["warn", "✖ Tidak follow"],
+  ragu: ["warn", "❔ Ragu (halaman habis)"],
+  error: ["err", "❌ Gagal dicek"],
+  unchecked: ["", "◦ Belum dicek"],
+};
+const scanState = (r) => r.error ? "error"
+  : (!r.checked_at ? "unchecked" : (r.state || "ragu"));
+
+async function loadScanSources() {
+  const [accs, sess] = await Promise.all([
+    api("/api/accounts?platform=instagram").catch(() => []),
+    api("/api/accounts/sessions?platform=instagram").catch(() => ({})),
+  ]);
+  const sel = $("#scanSource");
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML =
+    `<option value="all">— semua akun Instagram (${(accs || []).length}) —</option>` +
+    (accs || []).map((a) =>
+      `<option value="${a.id}">${a.kode ? a.kode + " · " : ""}@${a.username}${sess[String(a.id)] ? " 🔑" : ""}</option>`
+    ).join("");
+  sel.value = (cur && sel.querySelector(`option[value="${cur}"]`)) ? cur : "all";
+}
+
+function renderScan(d) {
+  SCAN = d.rows || [];
+  const k = d.ringkasan || {};
+  const target = ($("#scanTarget").value || "").trim().replace(/^@/, "");
+  $("#scanCount").textContent = `${k.total || 0} akun`;
+  const items = [
+    ["Total akun", k.total], ["Sudah follow", k.follow], ["Tidak follow", k.tidak],
+    ["Ragu", k.ragu], ["Gagal", k.error], ["Belum dicek", k.unchecked],
+    ["Lewat cookie", k.cookie], ["Lewat daftar", k.daftar],
+  ];
+  $("#scanStats").innerHTML = items.map(([kk, v]) =>
+    `<div class="stat"><div class="k">${kk}</div><div class="v">${fmt(v)}</div></div>`).join("");
+  const tb = $("#tblScan tbody");
+  tb.innerHTML = "";
+  SCAN.forEach((r) => {
+    const st = scanState(r);
+    const [cls, label] = SCAN_LABEL[st] || ["", st];
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${r.kode ?? ""}</td>` +
+      `<td>@${r.username || ""}</td>` +
+      `<td>${r.target_username ? "@" + r.target_username : (target ? "@" + target : "—")}</td>` +
+      `<td><span class="st ${cls}">${label}</span></td>` +
+      `<td class="small">${r.method === "cookie" ? "cookie 🔑" : (r.method === "daftar" ? "daftar" : "—")}</td>` +
+      `<td class="num">${r.method === "daftar" ? fmt(r.pages) : "–"}</td>` +
+      `<td class="num">${fmt(r.following_count)}</td>` +
+      `<td>${r.punya_cookie ? "ada" : "—"}</td>` +
+      `<td class="small">${r.checked_at || "—"}</td>` +
+      `<td class="small" title="${(r.error || "").replace(/"/g, "&quot;")}">${(r.error || "").slice(0, 64)}</td>`;
+    tb.appendChild(tr);
+  });
+  $("#scanEmpty").hidden = SCAN.length > 0;
+}
+
+async function loadScanResult() {
+  const target = ($("#scanTarget").value || "").trim().replace(/^@/, "");
+  const d = await api("/api/follow/scan?platform=instagram&target="
+    + encodeURIComponent(target)).catch(() => null);
+  if (d) renderScan(d);
+}
+
+$("#btnScanReload")?.addEventListener("click", async () => {
+  await loadScanSources(); loadScanResult();
+});
+$("#scanTarget")?.addEventListener("change", loadScanResult);
+
+$("#btnScanFollow")?.addEventListener("click", async () => {
+  const target = ($("#scanTarget").value || "").trim().replace(/^@/, "");
+  if (!target) { toast("Isi dulu username target."); return; }
+  const btn = $("#btnScanFollow");
+  btn.disabled = true;
+  try {
+    const { job_id } = await api("/api/follow/scan", {
+      method: "POST",
+      body: JSON.stringify({
+        platform: "instagram",
+        target,
+        source: $("#scanSource").value,
+        max_pages: Number($("#scanPages").value) || 5,
+      }),
+    });
+    $("#scanProg").hidden = false;
+    const poll = setInterval(async () => {
+      const j = await api("/api/jobs/" + job_id).catch(() => null);
+      if (!j) return;
+      const pct = j.total ? Math.round((100 * j.done) / j.total) : 0;
+      $("#scanBar").style.width = pct + "%";
+      $("#scanTxt").textContent =
+        `${j.done}/${j.total} akun — target @${j.target || target} · ok ${j.ok}, gagal ${j.fail}`;
+      if (j.status === "done") {
+        clearInterval(poll);
+        btn.disabled = false;
+        const err = j.result && j.result.error;
+        if (err) toast("❌ " + err);
+        else toast(`Selesai: ${j.ok} akun dicek, ${j.fail} gagal.`);
+        if (j.auth_stopped) toast("⚠ Sesi bermasalah — isi ulang cookie.");
+        loadScanResult();
+      }
+    }, 2000);
+  } catch (e) { btn.disabled = false; toast("❌ " + e.message); }
+});
+
+/* ---------- sesi per akun (Pengaturan) ---------- */
+async function loadAccSessions() {
+  const [accs, sess] = await Promise.all([
+    api("/api/accounts?platform=instagram").catch(() => []),
+    api("/api/accounts/sessions?platform=instagram").catch(() => ({})),
+  ]);
+  const sel = $("#accSessPick");
+  if (!sel) return {};
+  const cur = sel.value;
+  sel.innerHTML = (accs || []).map((a) =>
+    `<option value="${a.id}">${a.kode ? a.kode + " · " : ""}@${a.username}` +
+    `${sess[String(a.id)] ? " 🔑 ada cookie" : ""}</option>`).join("");
+  if (cur && sel.querySelector(`option[value="${cur}"]`)) sel.value = cur;
+  $("#accSessInfo").textContent =
+    `${Object.keys(sess || {}).length} dari ${(accs || []).length} akun Instagram punya cookie.`;
+  return sess;
+}
+
+$("#accSessPick")?.addEventListener("change", async () => {
+  const sess = await loadAccSessions().catch(() => ({}));
+  const id = $("#accSessPick").value;
+  $("#accSessMsg").textContent = (sess && sess[String(id)])
+    ? `Cookie tersimpan sejak ${sess[String(id)]}. Klik “Tes & cocokkan akun” untuk memastikan.`
+    : "Belum ada cookie untuk akun ini.";
+});
+
+$("#btnAccSessSave")?.addEventListener("click", async () => {
+  const aid = Number($("#accSessPick").value || 0);
+  const cookie = $("#accSessTxt").value.trim();
+  if (!aid) { $("#accSessMsg").textContent = "Pilih dulu akunnya."; return; }
+  if (!cookie) { $("#accSessMsg").textContent = "Tempel dulu cookie-nya."; return; }
+  try {
+    const r = await api("/api/accounts/session", {
+      method: "POST", body: JSON.stringify({ account_id: aid, cookie }),
+    });
+    $("#accSessTxt").value = "";
+    const c = r.cek || {};
+    $("#accSessMsg").textContent =
+      `Tersimpan (${r.n_cookies} cookie). ` + (c.ok ? "✅ " : "❌ ") + (c.detail || "");
+    loadAccSessions();
+  } catch (e) { $("#accSessMsg").textContent = "❌ " + e.message; }
+});
+
+$("#btnAccSessTest")?.addEventListener("click", async () => {
+  const aid = Number($("#accSessPick").value || 0);
+  if (!aid) { $("#accSessMsg").textContent = "Pilih dulu akunnya."; return; }
+  $("#accSessMsg").textContent = "Mengetes…";
+  try {
+    const r = await api("/api/accounts/session/test", {
+      method: "POST", body: JSON.stringify({ account_id: aid }),
+    });
+    $("#accSessMsg").textContent = (r.ok ? "✅ " : "❌ ") + (r.detail || "");
+  } catch (e) { $("#accSessMsg").textContent = "❌ " + e.message; }
+});
+
+$("#btnAccSessDel")?.addEventListener("click", async () => {
+  const aid = Number($("#accSessPick").value || 0);
+  if (!aid) return;
+  if (!confirm("Hapus cookie akun ini?")) return;
+  await api("/api/accounts/" + aid + "/session", { method: "DELETE" });
+  $("#accSessMsg").textContent = "Cookie dihapus.";
+  loadAccSessions();
+});
+
+$("#accSessFile")?.addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const aid = Number($("#accSessPick").value || 0);
+  if (!aid) { $("#accSessMsg").textContent = "Pilih dulu akunnya."; return; }
+  const fd = new FormData();
+  fd.append("file", f);
+  fd.append("account_id", String(aid));
+  try {
+    const r = await fetch("/api/accounts/session/upload", { method: "POST", body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+    const c = j.cek || {};
+    $("#accSessMsg").textContent =
+      `Tersimpan dari file (${j.n_cookies} cookie). ` + (c.ok ? "✅ " : "❌ ") + (c.detail || "");
+    loadAccSessions();
+  } catch (err) { $("#accSessMsg").textContent = "❌ " + err.message; }
+  e.target.value = "";
 });
 
 /* ---------- topbar ---------- */

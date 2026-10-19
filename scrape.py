@@ -15,7 +15,9 @@ import threading
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import textsafe
@@ -607,6 +609,46 @@ def fetch_instagram_friendship(target_user_id, cookies, timeout=30):
             "incoming_request": _b("incoming_request"),
             "is_private": _b("is_private"),
             "blocking": _b("blocking")}
+
+
+def new_rank_token():
+    """UUID untuk penelusuran daftar following.
+
+    rank_token harus UUID valid (instagram_private_api memanggil
+    raise_if_invalid_rank_token) dan harus SAMA untuk semua halaman dalam
+    satu penelusuran.
+    """
+    return str(uuid.uuid4())
+
+
+def fetch_instagram_following_page(user_id, cookies, rank_token,
+                                   max_id=None, timeout=30):
+    """Satu halaman daftar "following" (siapa yang diikuti) milik user_id.
+
+    BUTUH sesi — tetapi TIDAK harus sesi milik user_id: satu sesi sehat
+    cukup untuk membaca daftar following akun PUBLIK mana pun. Inilah yang
+    membuat "akun sumber" bisa dipilih bebas, bukan cuma akun admin.
+
+    Ref: instagram_private_api docs -> user_following(); instagrapi
+    `user_following_v1_chunk`. Jalur public GraphQL query_hash sudah MATI
+    (edges selalu kosong walau sesi valid) — instagrapi issue #2798.
+
+    Kembalikan {"users": [{"id", "username"}], "next_max_id", "more"}.
+    """
+    q = "rank_token=" + urllib.parse.quote(str(rank_token))
+    if max_id:
+        q += "&max_id=" + urllib.parse.quote(str(max_id))
+    status, body, _ = _ig_private_api(
+        f"friendships/{user_id}/following/?{q}", cookies, timeout)
+    d = _ig_json(status, body, "membaca daftar following")
+    users = d.get("users") or []
+    return {
+        "users": [{"id": str(u.get("pk") or u.get("id") or ""),
+                   "username": (u.get("username") or "").lower()}
+                  for u in users if isinstance(u, dict)],
+        "next_max_id": d.get("next_max_id") or None,
+        "more": bool(d.get("next_max_id")),
+    }
 
 
 # Host Facebook yang dicoba berurutan. www.facebook.com adalah yang utama,

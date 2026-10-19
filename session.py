@@ -254,6 +254,68 @@ def clear_stored(platform):
     db.set_setting("session_" + platform, "")
 
 
+# ---------- sesi PER AKUN (untuk "cek follow" dengan akun sumber bebas) ----------
+
+def get_account(account_id):
+    """Cookie sesi milik satu akun. Kembalikan dict (bisa kosong)."""
+    import db
+    raw = db.get_account_session(account_id)
+    if not raw:
+        return {}
+    try:
+        d = json.loads(raw)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_account(account_id, platform, cookies):
+    import db
+    db.save_account_session(account_id, platform, json.dumps(cookies))
+
+
+def clear_account(account_id):
+    import db
+    db.clear_account_session(account_id)
+
+
+def accounts_with_session(platform=None):
+    """{account_id: saved_at} — untuk badge di UI. Tanpa isi cookie."""
+    import db
+    return {r["account_id"]: r["saved_at"]
+            for r in db.list_account_sessions(platform)}
+
+
+def test_account(account_id, platform, username):
+    """Uji cookie akun SEPKALIGUS pastikan ia memang milik akun itu.
+
+    Salah tempel cookie itu mudah terjadi, dan akibatnya hasil cek follow
+    jadi milik orang lain. Karena itu identitasnya diverifikasi: username
+    akun yang dilaporkan cookie harus SAMA dengan akun yang dimaksud.
+    """
+    if platform != "instagram":
+        return {"ok": False, "username": None,
+                "detail": "sesi per akun saat ini hanya untuk Instagram"}
+    cookies = get_account(account_id)
+    if not cookies:
+        return {"ok": False, "username": None,
+                "detail": "belum ada cookie untuk akun ini"}
+    import scrape  # deferred: hindari circular import
+    me = scrape.fetch_instagram_self(cookies)
+    if not me or not me.get("username"):
+        # Cookie tidak terbaca / kedaluwarsa. test_session memberi pesan
+        # kapabilitas yang lebih spesifik (HTTP berapa, dll).
+        r = test_session(platform, cookies)
+        return {"ok": False, "username": None, "detail": r.get("detail") or
+                "cookie tidak bisa dipastikan"}
+    if me["username"].lower() != (username or "").lstrip("@").lower():
+        return {"ok": False, "username": me["username"],
+                "detail": f"cookie ini milik @{me['username']}, "
+                          f"BUKAN @{username} — jangan dipakai"}
+    return {"ok": True, "username": me["username"],
+            "detail": f"cookie cocok dengan @{me['username']}"}
+
+
 # ---------- tes sesi ----------
 
 def _looks_logged_out_threads(html):

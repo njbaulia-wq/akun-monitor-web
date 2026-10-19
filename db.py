@@ -75,6 +75,44 @@ CREATE TABLE IF NOT EXISTS follow_status (
     checked_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_posts_account ON posts(account_id);
+-- Sesi (cookie) PER AKUN: dibutuhkan "cek follow" dengan akun sumber bebas.
+-- Cookie disimpan lokal dan ikut terhapus otomatis saat akunnya dihapus
+-- (ON DELETE CASCADE) supaya tidak ada kredensial yatim.
+CREATE TABLE IF NOT EXISTS account_session (
+    account_id INTEGER PRIMARY KEY
+        REFERENCES accounts(id) ON DELETE CASCADE,
+    platform TEXT NOT NULL,
+    cookies TEXT NOT NULL,
+    saved_at TEXT
+);
+-- Cache id numerik Instagram per akun. Menghemat 1 request setiap kali cek.
+CREATE TABLE IF NOT EXISTS ig_user_cache (
+    account_id INTEGER PRIMARY KEY
+        REFERENCES accounts(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    username TEXT,
+    follower_count INTEGER,
+    following_count INTEGER,
+    is_private INTEGER,
+    cached_at TEXT
+);
+-- Hasil cek follow "akun sumber -> target bebas" (satu baris per akun sumber).
+CREATE TABLE IF NOT EXISTS follow_scan (
+    account_id INTEGER PRIMARY KEY
+        REFERENCES accounts(id) ON DELETE CASCADE,   -- akun SUMBER
+    platform TEXT NOT NULL,
+    target_username TEXT,
+    target_user_id TEXT,
+    state TEXT,           -- follow | tidak | ragu
+    method TEXT,          -- cookie (1 request) | daftar (baca following)
+    pages INTEGER DEFAULT 0,
+    following_count INTEGER,
+    follower_count INTEGER,
+    is_private INTEGER,
+    error TEXT,
+    checked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_follow_scan_target ON follow_scan(target_username);
 CREATE INDEX IF NOT EXISTS idx_posts_date ON posts(posted_at);
 CREATE INDEX IF NOT EXISTS idx_metrics_post ON metrics(post_id);
 """
@@ -230,6 +268,11 @@ def add_account(kode, platform, username, link_profile=""):
                (kode, platform, username, link_profile))
 
 
+def get_account(acc_id):
+    """Satu akun berdasarkan id (dict) atau None."""
+    return q("SELECT * FROM accounts WHERE id=?", (acc_id,), one=True)
+
+
 def find_account(platform, username):
     if not username:
         return None
@@ -371,11 +414,13 @@ def count_posts(scope, platform=None, account_id=None, sejak=None, sampai=None):
     # 'all' = seluruh data hasil scrape, jadi hasil cek follow ikut dihitung
     # supaya jumlah di dialog konfirmasi tidak menyesatkan.
     if scope == "all":
-        out["follows"] = (q("SELECT COUNT(*) c FROM follow_status WHERE "
-                            "checked_at IS NOT NULL", one=True)["c"]
-                          if not platform else
-                          q("SELECT COUNT(*) c FROM follow_status WHERE "
-                            "platform=?", (platform,), one=True)["c"])
+        def _c(tabel):
+            if platform:
+                return q(f"SELECT COUNT(*) c FROM {tabel} WHERE platform=?",
+                         (platform,), one=True)["c"]
+            return q(f"SELECT COUNT(*) c FROM {tabel} "
+                     f"WHERE checked_at IS NOT NULL", one=True)["c"]
+        out["follows"] = _c("follow_status") + _c("follow_scan")
     return out
 
 
@@ -390,6 +435,7 @@ def delete_posts(scope, platform=None, account_id=None, sejak=None, sampai=None)
     run(f"DELETE FROM posts WHERE {w}", a)
     if scope == "all":
         clear_follow_status(platform)
+        clear_follow_scan(platform)
     return n
 
 
@@ -477,6 +523,144 @@ def clear_follow_status(platform=None):
     if platform:
         return run("DELETE FROM follow_status WHERE platform=?", (platform,))
     return run("DELETE FROM follow_status")
+
+
+# ---------------- sesi per akun (untuk cek follow sumber bebas) ----------------
+
+def save_account_session(account_id, platform, cookies_raw):
+    """Simpan cookie sesi milik SATU akun (cookies_raw = JSON string)."""
+    return run(
+        "INSERT INTO account_session(account_id, platform, cookies, saved_at)"
+        " VALUES(?,?,?,?)"
+        " ON CONFLICT(account_id) DO UPDATE SET platform=excluded.platform,"
+        " cookies=excluded.cookies, saved_at=excluded.saved_at",
+        (account_id, platform, cookies_raw,
+         wib.now_wib().strftime("%Y-%m-%d %H:%M:%S")))
+
+
+def get_account_session(account_id):
+    """Cookie mentah (JSON string) milik satu akun, atau None."""
+    r = q("SELECT cookies FROM account_session WHERE account_id=?",
+          (account_id,), one=True)
+    return r["cookies"] if r else None
+
+
+def list_account_sessions(platform=None):
+    """Akun yang punya cookie — TANPA isi cookie-nya.
+
+    Sengaja tidak mengembalikan nilai cookie supaya kredensial tidak ikut
+    terkirim ke browser/halaman Pengaturan.
+    """
+    where = "WHERE platform=?" if platform else ""
+    args = (platform,) if platform else ()
+    return q(f"SELECT account_id, platform, saved_at FROM account_session "
+             f"{where} ORDER BY saved_at DESC", args)
+
+
+def clear_account_session(account_id):
+    return run("DELETE FROM account_session WHERE account_id=?", (account_id,))
+
+
+# ---------------- cache id numerik Instagram per akun ----------------
+
+def save_ig_cache(account_id, user_id, username=None, follower_count=None,
+                  following_count=None, is_private=None):
+    b = lambda v: None if v is None else (1 if v else 0)  # noqa: E731
+    return run(
+        "INSERT INTO ig_user_cache(account_id, user_id, username,"
+        " follower_count, following_count, is_private, cached_at)"
+        " VALUES(?,?,?,?,?,?,?)"
+        " ON CONFLICT(account_id) DO UPDATE SET user_id=excluded.user_id,"
+        " username=excluded.username,"
+        " follower_count=excluded.follower_count,"
+        " following_count=excluded.following_count,"
+        " is_private=excluded.is_private, cached_at=excluded.cached_at",
+        (account_id, str(user_id), username, follower_count, following_count,
+         b(is_private), wib.now_wib().strftime("%Y-%m-%d %H:%M:%S")))
+
+
+def get_ig_cache(account_id):
+    return q("SELECT * FROM ig_user_cache WHERE account_id=?",
+             (account_id,), one=True)
+
+
+# ---------------- hasil cek follow "sumber -> target bebas" ----------------
+
+def save_follow_scan(account_id, platform, target_username, target_user_id,
+                     state, method=None, pages=0, following_count=None,
+                     follower_count=None, is_private=None, error=None):
+    b = lambda v: None if v is None else (1 if v else 0)  # noqa: E731
+    return run(
+        "INSERT INTO follow_scan(account_id, platform, target_username,"
+        " target_user_id, state, method, pages, following_count,"
+        " follower_count, is_private, error, checked_at)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(account_id) DO UPDATE SET"
+        " platform=excluded.platform,"
+        " target_username=excluded.target_username,"
+        " target_user_id=excluded.target_user_id, state=excluded.state,"
+        " method=excluded.method, pages=excluded.pages,"
+        " following_count=excluded.following_count,"
+        " follower_count=excluded.follower_count,"
+        " is_private=excluded.is_private, error=excluded.error,"
+        " checked_at=excluded.checked_at",
+        (account_id, platform, target_username, target_user_id, state, method,
+         pages, following_count, follower_count, b(is_private), error,
+         wib.now_wib().strftime("%Y-%m-%d %H:%M:%S")))
+
+
+def list_follow_scan(platform=None, target_username=None):
+    """Semua akun + hasil cek terakhirnya (LEFT JOIN, akun belum-dicek tetap tampil)."""
+    clauses, args = [], []
+    if platform:
+        clauses.append("a.platform=?")
+        args.append(platform)
+    if target_username:
+        clauses.append("(s.target_username=? OR s.target_username IS NULL)")
+        args.append(target_username)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    return q(f"""
+        SELECT a.id AS account_id, a.kode, a.platform, a.username,
+               s.target_username, s.state, s.method, s.pages,
+               s.following_count, s.follower_count, s.is_private, s.error,
+               s.checked_at,
+               (SELECT 1 FROM account_session cs WHERE cs.account_id=a.id
+                LIMIT 1) AS punya_cookie
+        FROM accounts a
+        LEFT JOIN follow_scan s ON s.account_id = a.id
+        {where}
+        ORDER BY a.kode, a.username
+    """, tuple(args))
+
+
+def follow_scan_counts(platform="instagram", target_username=None):
+    rows = list_follow_scan(platform, target_username)
+    n = {"total": len(rows), "follow": 0, "tidak": 0, "ragu": 0,
+         "error": 0, "unchecked": 0, "cookie": 0, "daftar": 0}
+    for r in rows:
+        if r["error"]:
+            n["error"] += 1
+            continue
+        if not r["checked_at"]:
+            n["unchecked"] += 1
+            continue
+        if r["state"] == "follow":
+            n["follow"] += 1
+        elif r["state"] == "tidak":
+            n["tidak"] += 1
+        else:
+            n["ragu"] += 1
+        if r["method"] == "cookie":
+            n["cookie"] += 1
+        elif r["method"] == "daftar":
+            n["daftar"] += 1
+    return n
+
+
+def clear_follow_scan(platform=None):
+    if platform:
+        return run("DELETE FROM follow_scan WHERE platform=?", (platform,))
+    return run("DELETE FROM follow_scan")
 
 
 def post_history(post_id):

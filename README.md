@@ -246,6 +246,9 @@ Cari pesan error kamu di kolom kiri, ikuti cara betulkannya di kanan.
 | Cek Follow: "belum ada sesi login instagram" | Fitur ini wajib cookie. Isi dulu di Pengaturan → Sesi login, lalu coba lagi |
 | Cek Follow: banyak akun `❌ gagal` (HTTP 429) | Instagram sedang membatasi permintaan. Tunggu beberapa jam, naikkan jeda di Pengaturan, lalu jalankan lagi |
 | Cek Follow: semua gagal walau cookie baru | Cookie kedaluwarsa. Export ulang cookie Instagram, simpan lagi di Pengaturan |
+| Cek bebas: status `❔ ragu` semua | Batas halaman tercapai sebelum target ketemu. Naikkan “maks halaman”, atau pasang cookie untuk akun sumber itu |
+| Cek bebas: `tidak ada sesi Instagram` | Isi sesi admin (Pengaturan → Sesi login) atau sesi per akun sekurang-kurangnya satu |
+| Sesi per akun: `cookie ini milik @X, BUKAN @Y` | Salah tempel — cookie itu milik akun lain. Export ulang dari akun yang benar |
 
 Masih buntu? Lihat file `data/app.log` (catatan error) atau ulangi dari [Bagian B](#bagian-b-menjalankan-tiap-hari) dengan CMD baru.
 
@@ -300,11 +303,9 @@ Cookie tersimpan **hanya** di `data/pantauakun.db` di komputermu (tidak ikut ter
 
 ### Cek follow (butuh sesi, opsional)
 
-Menu **Cek Follow** menjawab: *"apakah akun admin sudah follow akun ini, dan apakah akun ini follow balik?"* — sekaligus untuk seluruh akun Instagram di daftarmu.
+Menu **Cek Follow** punya **dua panel**:
 
-Klik **⇄ Cek follow sekarang**, tunggu (±1 detik per akun), hasilnya muncul di tabel beserta ringkasannya.
-
-**Arti tiap status:**
+**① Cek cepat — akun admin.** Klik **⇄ Cek follow sekarang**: untuk semua akun di daftar, ditampilkan apakah *akun admin* sudah follow dia dan apakah dia follow balik. Ini jalur termurah (1 request per akun).
 
 | Status | Artinya |
 |---|---|
@@ -313,15 +314,28 @@ Klik **⇄ Cek follow sekarang**, tunggu (±1 detik per akun), hasilnya muncul d
 | ← Mereka follow, admin belum | dia follow kamu, kamu belum follow dia |
 | ✖ Belum saling follow | dua-duanya tidak saling follow |
 | ⏳ Menunggu izin (privat) | permintaan follow masih menunggu persetujuan |
-| ❌ Gagal dicek | sesi habis / kena rate-limit / akun hilang — lihat kolom *Catatan* |
+| ❌ Gagal dicek | sesi habis / kena rate-limit / akun hilang — lihat *Catatan* |
 | ◦ Belum dicek | belum pernah dijalankan |
+
+**② Cek bebas — pilih akun sumber.** Pilih akun sumber (boleh **bukan** akun admin — satu akun tertentu atau semua akun), ketik **username target**, lalu klik **🔎 Cek**. Aplikasi menjawab: *"apakah akun sumber ini sudah follow target?"*
+
+Cara kerjanya (hybrid, otomatis):
+
+| Kondisi akun sumber | Cara yang dipakai | Biaya |
+|---|---|---|
+| punya cookie sendiri | `friendships/show` | 1 request — jawaban pasti |
+| tidak punya cookie | baca daftar "following"-nya halaman demi halaman | 1 request per halaman (≈24–50 orang/halaman) |
+
+Kalau batas **maks halaman** tercapai tapi target belum ketemu, statusnya **❔ ragu** — artinya *tidak ditemukan dalam N halaman pertama*, **bukan** "tidak follow". Naikkan "maks halaman" kalau akun sumbernya mengikuti banyak orang.
+
+**Sesi per akun** (Pengaturan → *Sesi per akun*): simpan cookie milik satu akun tertentu supaya panel ② cukup 1 request. Ada pengaman — saat disimpan, aplikasi langsung memeriksa apakah cookie itu **benar-benar milik akun tersebut**; kalau salah tempel, langsung ditolak.
 
 **Yang wajib kamu pahami (jujur, tanpa dilebih-lebihkan):**
 
-1. **Wajib ada cookie sesi Instagram.** Instagram tidak menyediakan data follow tanpa login — tidak ada jalan lain. Tanpa cookie, menu ini tidak jalan.
-2. **Hanya bisa dibaca relatif terhadap akun admin.** Yang terbaca adalah hubungan *akun pemilik cookie* dengan tiap akun. Untuk pertanyaan "apakah akun A follow akun B" di mana keduanya **bukan** akun admin, dibutuhkan cookie akun A.
-3. **Ini bukan API resmi.** Menu ini memakai jalur internal Instagram (di luar ToS Instagram). Risikonya nyata: **akun admin bisa kena rate-limit sementara sampai pembatasan**. Aplikasi sudah memberi jeda sopan, tetapi risiko tetap milikmu.
-4. **Jangan terlalu sering.** Cukup 1× per minggu/bulan. Kalau banyak akun `❌ gagal` dengan keterangan HTTP 429, hentikan dulu beberapa jam lalu ulangi.
+1. **Butuh minimal satu cookie Instagram.** Instagram tidak menyediakan data follow tanpa login — tidak ada jalan lain. Tanpa sesi sama sekali, kedua panel tidak jalan.
+2. **Ini bukan API resmi.** Memakai jalur internal Instagram, di luar ToS Instagram. Risikonya nyata: **akun yang cookie-nya dipakai bisa kena rate-limit sampai pembatasan.** Aplikasi sudah memberi jeda sopan, tetapi risiko tetap milikmu.
+3. **Panel ② jauh lebih berat** daripada panel ① kalau akun sumbernya tidak punya cookie. Jangan dipakai untuk semua 58 akun berkali-kali sehari.
+4. **Jangan terlalu sering.** Cukup 1× per minggu/bulan. Kalau banyak `❌ gagal` dengan keterangan HTTP 429, hentikan beberapa jam lalu ulangi.
 
 ### Link yang dikenali
 

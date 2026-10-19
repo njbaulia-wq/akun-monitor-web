@@ -312,10 +312,11 @@
       <div class="card">
         <div class="card-head">
           <div>
-            <h2>Cek Follow <span class="pill" id="followCount"></span></h2>
+            <h2>Cek cepat — akun admin <span class="pill" id="followCount"></span></h2>
             <p class="muted">Cek apakah <b>akun admin</b> (yang cookie-nya
             tersimpan di Pengaturan) sudah follow tiap akun di daftar, dan
-            apakah akun itu <b>follow balik</b>.</p>
+            apakah akun itu <b>follow balik</b>. Ini jalur termurah: 1 request
+            per akun.</p>
           </div>
           <div class="row" style="margin:0">
             <button class="btn primary" id="btnCekFollow">⇄ Cek follow sekarang</button>
@@ -363,9 +364,61 @@
         <p class="muted small" style="margin-top:10px">
           ⚠ Ini memakai jalur API privat Instagram, bukan API resmi — di luar
           ToS Instagram dan berisiko membuat <b>akun admin</b> kena
-          rate-limit/pembatasan. Jeda sopan tetap dipakai. Relasi hanya bisa
-          dibaca <b>relatif terhadap akun admin</b>; untuk “akun A follow akun
-          B” dibutuhkan cookie akun A.
+          rate-limit/pembatasan. Jeda sopan tetap dipakai.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Cek bebas — pilih akun sumber <span class="pill" id="scanCount"></span></h2>
+            <p class="muted">Pilih <b>akun sumber</b> (boleh bukan akun admin),
+            lalu ketik <b>username target</b>. Aplikasi menjawab:
+            “apakah akun sumber ini sudah follow target?”</p>
+          </div>
+        </div>
+        <div class="row gap">
+          <label class="field" style="margin:0">Akun sumber
+            <select id="scanSource"><option value="all">— semua akun Instagram —</option></select>
+          </label>
+          <label class="field" style="margin:0">Target (username)
+            <input id="scanTarget" placeholder="akun_pusat" size="20">
+          </label>
+          <label class="field" style="margin:0">maks halaman
+            <input type="number" id="scanPages" value="5" min="1" max="50" style="width:62px">
+          </label>
+          <button class="btn primary" id="btnScanFollow">🔎 Cek</button>
+          <button class="btn ghost" id="btnScanReload">⟳ Muat</button>
+        </div>
+        <p class="muted small" style="margin:8px 0 0">
+          Cara kerja (hybrid): kalau akun sumber <b>punya cookie sendiri</b> →
+          1 request, jawaban pasti. Kalau tidak → daftar “following”-nya
+          dibaca halaman demi halaman (1 halaman ≈ 24–50 orang) sampai target
+          ketemu. Kalau halaman habis sebelum ketemu, statusnya
+          <b>❔ ragu</b> — bukan “tidak follow”. Isi cookie per akun di
+          <a href="#" data-goto="pengaturan">Pengaturan</a> supaya ngebut.
+        </p>
+        <div class="progress" id="scanProg" hidden style="margin-top:10px">
+          <div class="bar"><div id="scanBar"></div></div>
+          <div class="muted small" id="scanTxt" style="margin-top:6px"></div>
+        </div>
+        <div class="stats" id="scanStats" style="margin-top:12px"></div>
+        <div class="table-wrap">
+          <table id="tblScan">
+            <thead><tr>
+              <th>Kode</th><th>Akun sumber</th><th>Target</th><th>Status</th>
+              <th>Cara</th><th class="num">Halaman</th><th class="num">Diikuti</th>
+              <th>Cookie</th><th>Dicek</th><th>Catatan</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="empty" id="scanEmpty" hidden>Belum ada hasil. Pilih akun
+        sumber, ketik target, lalu klik “Cek”.</div>
+        <p class="muted small" style="margin-top:10px">
+          ⚠ Sama seperti di atas: jalur API privat, di luar ToS Instagram.
+          Membaca daftar following jauh lebih berat daripada 1 request — jadi
+          <b>jangan dipakai untuk semua 58 akun berkali-kali sehari</b>.
         </p>
       </div>
     </section>
@@ -418,6 +471,27 @@
             <li>Klik <b>Tes sesi</b> — kalau valid, fitur terkunci ikut kebuka. Cookie kedaluwarsa? Export ulang &amp; simpan lagi.</li>
           </ol>
         </details>
+        <hr>
+        <h2>Sesi per akun <span class="muted small">(opsional — supaya “Cek bebas” ngebut)</span></h2>
+        <p class="muted">Simpan cookie milik <b>satu akun tertentu</b> supaya
+        pengecekan “sudah follow belum” cukup <b>1 request</b>, tanpa membaca
+        daftar following. Isi hanya untuk akun yang sering kamu cek —
+        <b>tiap akun yang cookie-nya disimpan ikut berisiko kena pembatasan
+        Instagram</b>, jadi jangan dipasang ke semua akun tanpa alasan.</p>
+        <div class="row gap">
+          <label class="field" style="margin:0">Akun Instagram
+            <select id="accSessPick"></select>
+          </label>
+          <span class="muted small" id="accSessInfo"></span>
+        </div>
+        <textarea id="accSessTxt" rows="2" placeholder="Tempel cookie akun ini — atau upload cookies.txt di bawah"></textarea>
+        <div class="row gap">
+          <label class="btn small">📁 Upload cookies.txt<input type="file" id="accSessFile" accept=".txt" hidden></label>
+          <button class="btn small primary" id="btnAccSessSave">Simpan</button>
+          <button class="btn small" id="btnAccSessTest">Tes &amp; cocokkan akun</button>
+          <button class="btn small danger" id="btnAccSessDel">Hapus</button>
+        </div>
+        <div class="muted small" id="accSessMsg"></div>
         <hr>
         <h2>Tarik otomatis per akun</h2>
         <p class="muted">Threads jalan tanpa login. Instagram <b>butuh sesi login</b> (lihat atas) — tanpa sesi, pakai <b>Input Link</b>. TikTok tetap via <b>Input Link</b> (daftar video per akun tidak bisa diambil via web tanpa browser).</p>

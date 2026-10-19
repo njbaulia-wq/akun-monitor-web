@@ -319,6 +319,200 @@ def follow_check_job(jid, platform="instagram"):
                        "admin": admin})
 
 
+# ------------- cek follow bebas: akun SUMBER dipilih, target diketik -------------
+# Alur per akun sumber:
+#   a. kalau akun itu punya cookie sendiri -> friendships/show/<target_id>
+#      = 1 request, jawaban pasti (tembus target privat).
+#   b. kalau tidak (atau cookie-nya mati) -> baca daftar "following" akun itu
+#      halaman demi halaman sampai target ketemu. Berhenti di `max_pages`;
+#      kalau belum ketemu, hasilnya "ragu", BUKAN "tidak follow" — pencarian
+#      memang terputus, dan itu harus jujur ditampilkan.
+# Ref jalur (b): scrape.fetch_instagram_following_page (jalur v1 yang masih
+# hidup; jalur public GraphQL query_hash sudah mati — instagrapi issue #2798).
+
+FOLLOW_SCAN_MAXPAGES_DEFAULT = 5
+
+
+def _resolve_ig_user(username, cookies, cache_account_id=None):
+    """username -> {id, username, follower_count, following_count, is_private}.
+
+    Memakai cache DB bila akun ini pernah dibaca (menghemat 1 request).
+    Melempar scrape.ScrapeFailed kalau tidak bisa dibaca.
+    """
+    un = (username or "").lstrip("@").strip()
+    if not un:
+        raise scrape.ScrapeFailed("username kosong", retryable=False)
+    if cache_account_id:
+        c = db.get_ig_cache(cache_account_id)
+        if (c and c.get("user_id")
+                and (c.get("username") or "").lower() == un.lower()):
+            return {"id": c["user_id"], "username": c["username"],
+                    "follower_count": c["follower_count"],
+                    "following_count": c["following_count"],
+                    "is_private": bool(c["is_private"])}
+    p = scrape.fetch_instagram_profile(un, cookies)
+    if not p.get("id"):
+        raise scrape.ScrapeFailed(f"id @{un} tidak ditemukan", retryable=False)
+    if cache_account_id:
+        db.save_ig_cache(cache_account_id, p["id"], p.get("username"),
+                         p.get("follower_count"), p.get("following_count"),
+                         p.get("is_private"))
+    return p
+
+
+def _ig_pools(platform, accs, admin):
+    """Daftar cookie yang bisa dipakai, sesi admin lebih dulu."""
+    out = [admin] if admin else []
+    out += [session.get_account(a["id"]) for a in accs]
+    return [c for c in out if c]
+
+
+def follow_scan_job(jid, platform, target_username, source_id, max_pages):
+    """Cek 'apakah akun SUMBER follow target' — satu akun atau seluruh daftar."""
+    delay = float(db.get_setting("scrape_delay", "2") or 2)
+    max_pages = max(1, int(max_pages or FOLLOW_SCAN_MAXPAGES_DEFAULT))
+    admin = session.get_stored(platform)
+    accs = db.list_accounts(platform)
+    if source_id:
+        accs = [a for a in accs if a["id"] == source_id]
+    job_update(jid, total=len(accs), platform=platform, target=target_username)
+
+    if not accs:
+        job_update(jid, status="done",
+                   result={"ok": 0, "fail": 0, "error": "tidak ada akun sumber"})
+        return
+
+    pools = _ig_pools(platform, accs, admin)
+    if not pools:
+        with jobs_lock:
+            jobs[jid]["errors"].append(
+                "tidak ada sesi Instagram yang bisa dipakai — isi cookie di "
+                "Pengaturan (sesi admin) atau sesi per akun.")
+        job_update(jid, status="done",
+                   result={"ok": 0, "fail": len(accs),
+                           "error": "tidak ada sesi Instagram"})
+        return
+
+    # Resolusi target SEKALI, sekaligus mencari sesi "pembaca" yang benar-benar
+    # hidup (dipakai untuk semua pembacaan daftar following).
+    un_target = (target_username or "").lstrip("@").strip()
+    tgt, reader = None, None
+    pesan = ""
+    for ck in pools:
+        try:
+            tgt = scrape.fetch_instagram_profile(un_target, ck)
+            if tgt.get("id"):
+                reader = ck
+                break
+        except Exception as e:  # noqa: BLE001 - coba sesi berikutnya
+            pesan = str(e)[:200]
+    if not reader:
+        with jobs_lock:
+            jobs[jid]["errors"].append(
+                pesan or f"target @{un_target} tidak bisa dibaca")
+        job_update(jid, status="done",
+                   result={"ok": 0, "fail": len(accs),
+                           "error": pesan or
+                           f"target @{un_target} tidak bisa dibaca"})
+        return
+
+    target_id = str(tgt["id"])
+    target_un = (tgt.get("username") or un_target)
+    target_privat = tgt.get("is_private")
+    job_update(jid, target=target_un, target_user_id=target_id)
+
+    def cek_lewat_daftar(acc):
+        """Baca daftar following akun ini sampai target ketemu / halaman habis."""
+        src = _resolve_ig_user(acc["username"], reader, acc["id"])
+        sid = str(src["id"])
+        rank = scrape.new_rank_token()
+        max_id, pages, ketemu = None, 0, False
+        while pages < max_pages:
+            polite_wait(platform)
+            page = scrape.fetch_instagram_following_page(sid, reader, rank,
+                                                        max_id)
+            pages += 1
+            for u in page["users"]:
+                if u.get("id") == target_id or \
+                        (u.get("username") or "").lower() == target_un.lower():
+                    ketemu = True
+                    break
+            if ketemu or not page["more"] or not page["next_max_id"]:
+                break
+            max_id = page["next_max_id"]
+        # max_id masih terisi = masih ada halaman yang BELUM dibaca.
+        terputus = (not ketemu) and (max_id is not None)
+        return {"state": "follow" if ketemu else
+                         ("ragu" if terputus else "tidak"),
+                "method": "daftar", "pages": pages,
+                "following_count": src.get("following_count"),
+                "follower_count": src.get("follower_count"),
+                "is_private": src.get("is_private")}
+
+    ok = fail = 0
+    streak = 0
+    berhenti = False
+
+    for acc in accs:
+        try:
+            hasil = None
+            own = session.get_account(acc["id"])
+            if own:
+                try:
+                    polite_wait(platform)
+                    fs = scrape.fetch_instagram_friendship(target_id, own)
+                    hasil = {"state": "follow" if fs.get("following") else "tidak",
+                             "method": "cookie", "pages": 0,
+                             "following_count": None, "follower_count": None,
+                             "is_private": fs.get("is_private")}
+                except Exception as e:  # noqa: BLE001 - jatuh ke jalur daftar
+                    with jobs_lock:
+                        jobs[jid]["errors"].append(
+                            f"@{acc['username']}: cookie akun gagal "
+                            f"({str(e)[:60]}) — dicoba lewat daftar following")
+            if hasil is None:
+                hasil = cek_lewat_daftar(acc)
+            db.save_follow_scan(acc["id"], platform, target_un, target_id,
+                                hasil["state"], hasil["method"],
+                                hasil["pages"], hasil["following_count"],
+                                hasil["follower_count"], hasil["is_private"],
+                                None)
+            ok += 1
+            streak = 0
+        except Exception as e:  # noqa: BLE001 - status dicatat per akun
+            fail += 1
+            msg = str(e)[:200]
+            try:
+                db.save_follow_scan(acc["id"], platform, target_un, target_id,
+                                    None, None, 0, None, None, None, msg)
+            except Exception:  # noqa: BLE001 - akun mungkin sudah dihapus
+                pass
+            with jobs_lock:
+                jobs[jid]["errors"].append(f"@{acc['username']}: {msg[:90]}")
+            if _looks_like_auth_problem(msg):
+                streak += 1
+                if streak >= 3:
+                    with jobs_lock:
+                        jobs[jid]["errors"].append(
+                            f"[{platform}] Sesi bermasalah — sisa akun "
+                            f"dilewati. Isi ulang cookie di Pengaturan.")
+                        jobs[jid]["auth_stopped"] = platform
+                    berhenti = True
+            else:
+                streak = 0
+        with jobs_lock:
+            jobs[jid]["done"] += 1
+            jobs[jid]["ok"] = ok
+            jobs[jid]["fail"] = fail
+        if berhenti:
+            break
+        time.sleep(delay)
+
+    job_update(jid, status="done",
+               result={"ok": ok, "fail": fail, "platform": platform,
+                       "target": target_un})
+
+
 # ---------------- background: scrape banyak link ----------------
 # Model: background job + 3 worker + jeda sopan per platform (min 2 dtk)
 # + retry otomatis (maks 3x, backoff eksponensial + jitter) hanya untuk
@@ -882,6 +1076,91 @@ class Handler(BaseHTTPRequestHandler):
                                      args=(jid, plat), daemon=True)
                 t.start()
                 self.send_json({"ok": True, "job_id": jid, "platform": plat})
+            elif p == "/api/follow/scan":
+                b = self.read_json()
+                plat = (b.get("platform") or "instagram").strip().lower()
+                if plat not in FOLLOW_PLATFORMS:
+                    return self.send_json(
+                        {"error": "cek follow bebas saat ini hanya untuk "
+                                  "Instagram"}, 400)
+                target = (b.get("target") or "").lstrip("@").strip()
+                if not target:
+                    return self.send_json(
+                        {"error": "target (username yang mau dicek) wajib diisi"},
+                        400)
+                src = str(b.get("source") or "all").strip().lower()
+                try:
+                    source_id = None if src in ("all", "", "semua") else int(src)
+                except ValueError:
+                    return self.send_json({"error": "akun sumber salah"}, 400)
+                try:
+                    max_pages = int(b.get("max_pages")
+                                    or FOLLOW_SCAN_MAXPAGES_DEFAULT)
+                except (TypeError, ValueError):
+                    max_pages = FOLLOW_SCAN_MAXPAGES_DEFAULT
+                max_pages = max(1, min(max_pages, 50))
+                jid = new_job("follow_scan", 0)
+                t = threading.Thread(
+                    target=follow_scan_job,
+                    args=(jid, plat, target, source_id, max_pages), daemon=True)
+                t.start()
+                self.send_json({"ok": True, "job_id": jid, "platform": plat,
+                                "target": target, "max_pages": max_pages})
+            elif p == "/api/accounts/session":
+                b = self.read_json()
+                try:
+                    aid = int(b.get("account_id") or 0)
+                except (TypeError, ValueError):
+                    aid = 0
+                acc = db.get_account(aid) if aid else None
+                if not acc:
+                    return self.send_json({"error": "akun tidak ditemukan"}, 400)
+                if acc["platform"] != "instagram":
+                    return self.send_json(
+                        {"error": "sesi per akun saat ini hanya untuk Instagram"},
+                        400)
+                try:
+                    cookies = session.parse_any(b.get("cookie") or "")
+                except ValueError as e:
+                    return self.send_json({"error": str(e)}, 400)
+                session.save_account(aid, acc["platform"], cookies)
+                self.send_json({"ok": True, "n_cookies": len(cookies),
+                                "cek": session.test_account(
+                                    aid, acc["platform"], acc["username"])})
+            elif p == "/api/accounts/session/upload":
+                parts = self.read_multipart()
+                if "file" not in parts:
+                    return self.send_json({"error": "file tidak diterima"}, 400)
+                _fname, data = parts["file"]
+                aid = 0
+                if "account_id" in parts:
+                    try:
+                        aid = int(parts["account_id"][1].decode().strip())
+                    except (ValueError, AttributeError):
+                        aid = 0
+                acc = db.get_account(aid) if aid else None
+                if not acc or acc["platform"] != "instagram":
+                    return self.send_json(
+                        {"error": "akun tidak ditemukan / bukan Instagram"}, 400)
+                try:
+                    cookies = session.parse_any(data.decode("utf-8", "replace"))
+                except ValueError as e:
+                    return self.send_json({"error": str(e)}, 400)
+                session.save_account(aid, acc["platform"], cookies)
+                self.send_json({"ok": True, "n_cookies": len(cookies),
+                                "cek": session.test_account(
+                                    aid, acc["platform"], acc["username"])})
+            elif p == "/api/accounts/session/test":
+                b = self.read_json()
+                try:
+                    aid = int(b.get("account_id") or 0)
+                except (TypeError, ValueError):
+                    aid = 0
+                acc = db.get_account(aid) if aid else None
+                if not acc:
+                    return self.send_json({"error": "akun tidak ditemukan"}, 400)
+                self.send_json(session.test_account(
+                    aid, acc["platform"], acc["username"]))
             elif p == "/api/sessions":
                 b = self.read_json()
                 plat = (b.get("platform") or "").strip().lower()
@@ -966,6 +1245,11 @@ class Handler(BaseHTTPRequestHandler):
             n = db.delete_posts("post", account_id=int(m.group(1)))
             self.send_json({"ok": True, **n})
             return
+        m = re.match(r"^/api/accounts/(\d+)/session$", p)
+        if m:
+            session.clear_account(int(m.group(1)))
+            self.send_json({"ok": True})
+            return
         m = re.match(r"^/api/accounts/(\d+)$", p)
         if m:
             db.delete_account(int(m.group(1)))
@@ -1006,6 +1290,19 @@ class Handler(BaseHTTPRequestHandler):
                 "sesi_aktif": bool(session.get_stored(plat)),
                 "ringkasan": db.follow_counts(plat),
                 "rows": db.list_follow_status(plat)})
+        elif p == "/api/follow/scan":
+            plat = g("platform") or "instagram"
+            target = (g("target") or "").lstrip("@").strip()
+            self.send_json({
+                "platform": plat,
+                "target": target,
+                "sesi_admin": bool(session.get_stored(plat)),
+                "akun_bercookie": len(session.accounts_with_session(plat)),
+                "ringkasan": db.follow_scan_counts(plat, target or None),
+                "rows": db.list_follow_scan(plat, target or None)})
+        elif p == "/api/accounts/sessions":
+            # {account_id: saved_at} — daftar akun yang punya cookie sendiri.
+            self.send_json(session.accounts_with_session(g("platform") or None))
         elif p == "/api/counts":
             self.send_json(db.count_accounts())
         elif p == "/api/posts/count":
