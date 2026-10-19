@@ -495,6 +495,120 @@ def fetch_instagram_account(username, cookies, limit=30):
     return out
 
 
+# ---------------- cek follow (relasi terhadap akun PEMILIK SESI) ----------------
+# Riset 2026-10-19 (hasil terverifikasi):
+#   * Instagram TIDAK mengekspos relasi follow secara publik. Tidak ada jalur
+#     tanpa login: `web_profile_info` kini sering balas HTTP 400 "make sure you
+#     are logged in", dan daftar follower/following ditutup untuk scraper.
+#   * Satu-satunya jalur = private API dengan cookie sesi.
+#   * `friendships/show/<id>/` mengembalikan relasi RELATIF terhadap akun
+#     PEMILIK SESI (akun admin), BUKAN relasi antar dua akun sembarang:
+#         following        -> akun admin sudah follow target
+#         followed_by      -> target follow balik akun admin
+#         outgoing_request -> permintaan follow admin menunggu (target privat)
+#         incoming_request -> target minta follow admin
+#     Ref: instagram_private_api docs -> friendships.show()
+#   * Karena itu fitur "cek follow" hanya bermakna untuk relasi vs akun admin.
+#     Untuk "A follow B" antar akun sembarang, dibutuhkan sesi akun A.
+#   * Jalur ini bukan API resmi: patuhi jeda sopan, dan pahami risikonya
+#     (rate-limit / pembatasan akun admin). Lihat README.
+
+IG_APP_ID = "936619743392459"      # web app id (sama dgn listing akun IG)
+
+
+def _ig_private_api(path, cookies, timeout=30):
+    """GET ke i.instagram.com/api/v1/<path> memakai cookie sesi login."""
+    import session as _sess
+    return _sess.fetch("https://i.instagram.com/api/v1/" + path.lstrip("/"),
+                       cookies,
+                       headers={"X-IG-App-ID": IG_APP_ID,
+                                "Accept": "application/json"},
+                       timeout=timeout)
+
+
+def _ig_json(status, body, what):
+    """Parse JSON respons IG dengan pesan kesalahan yang jujur.
+
+    Pesan sengaja memuat frasa "sesi login" supaya deteksi sesi-mati di
+    app.py (_AUTH_HINTS) mengenalinya dan lane berhenti, bukan gagal
+    diam-diam satu per satu.
+    """
+    import json as _json
+    if status != 200:
+        raise ScrapeFailed(
+            f"sesi login Instagram bermasalah (HTTP {status}) saat {what} — "
+            f"cookie kedaluwarsa, kena rate-limit, atau akun dibatasi. "
+            f"Isi ulang cookie di Pengaturan.",
+            retryable=status in (429, 500, 502, 503, 504))
+    try:
+        return _json.loads(body or "{}")
+    except ValueError:
+        raise ScrapeFailed(f"respons Instagram tak dikenal saat {what}",
+                           retryable=False)
+
+
+def fetch_instagram_self(cookies):
+    """Akun yang sedang login (label "akun admin"). None bila gagal.
+
+    Tidak pernah melempar: kegagalan di sini hanya berarti label admin
+    tidak tersedia, bukan kegagalan cek follow.
+    """
+    try:
+        status, body, _ = _ig_private_api(
+            "accounts/current_user/?edit=false", cookies, timeout=20)
+        if status != 200:
+            return None
+        u = (__import__("json").loads(body or "{}") or {}).get("user") or {}
+        if not u:
+            return None
+        return {"id": str(u.get("pk") or u.get("id") or ""),
+                "username": u.get("username") or "",
+                "full_name": u.get("full_name") or ""}
+    except Exception:  # noqa: BLE001 - label opsional
+        return None
+
+
+def fetch_instagram_profile(username, cookies, timeout=30):
+    """Profil ringkas IG (id, jumlah follower/following, privat) — BUTUH sesi."""
+    status, body, _ = _ig_private_api(
+        "users/web_profile_info/?username=" + username.lstrip("@").strip(),
+        cookies, timeout)
+    d = _ig_json(status, body, f"membaca profil @{username.lstrip('@')}")
+    u = (d.get("data") or {}).get("user")
+    if not u:
+        raise ScrapeFailed(
+            f"profil @{username.lstrip('@')} tidak dikembalikan Instagram "
+            f"(akun dihapus/diblokir, atau sesi tidak cukup)", retryable=False)
+    return {"id": str(u.get("id") or ""),
+            "username": u.get("username") or username.lstrip("@"),
+            "full_name": u.get("full_name") or "",
+            "is_private": bool(u.get("is_private")),
+            "is_verified": bool(u.get("is_verified")),
+            "follower_count": (u.get("edge_followed_by") or {}).get("count"),
+            "following_count": (u.get("edge_follow") or {}).get("count")}
+
+
+def fetch_instagram_friendship(target_user_id, cookies, timeout=30):
+    """Relasi akun sesi (admin) dengan target_user_id — BUTUH sesi.
+
+    Kembalikan dict boolean (None = Instagram tidak mengirim field itu).
+    """
+    status, body, _ = _ig_private_api(
+        f"friendships/show/{target_user_id}/", cookies, timeout)
+    d = _ig_json(status, body, "cek relasi follow")
+
+    def _b(k):
+        v = d.get(k)
+        return None if v is None else bool(v)
+
+    return {"following": _b("following"),
+            "followed_by": _b("followed_by"),
+            "outgoing_request": _b("outgoing_request"),
+            "incoming_request": _b("incoming_request"),
+            "is_private": _b("is_private"),
+            "blocking": _b("blocking")}
+
+
 # Host Facebook yang dicoba berurutan. www.facebook.com adalah yang utama,
 # tapi di beberapa jaringan (dumps DNS, firewall kantor, sandbox) host itu
 # diblokir sementara m./free./mbasic tetap hidup — markup mbasic jauh lebih

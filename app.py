@@ -13,6 +13,7 @@ import mimetypes
 import os
 import queue
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -210,6 +211,112 @@ def threads_bulk_job(jid, sejak, sampai):
         time.sleep(delay)
     job_update(jid, status="done",
                result={"ok": ok, "fail": fail, "sejak": sejak, "sampai": sampai})
+
+
+# ---------------- background: cek follow (relasi vs akun admin) ----------------
+# Instagram TIDAK mengekspos relasi follow secara publik (riset 2026-10-19):
+# tidak ada jalur tanpa login. Fitur ini karena itu WAJIB cookie sesi, dan
+# hanya bisa menjawab relasi RELATIF terhadap akun PEMILIK SESI (akun admin) —
+# bukan "akun A follow akun B" untuk dua akun sembarang.
+
+FOLLOW_PLATFORMS = ("instagram",)      # platform yang mendukung cek follow
+
+
+def follow_check_job(jid, platform="instagram"):
+    """Cek follow tiap akun di daftar terhadap akun admin (sesi login)."""
+    delay = float(db.get_setting("scrape_delay", "2") or 2)
+    cookies = session.get_stored(platform)
+    accounts = db.list_accounts(platform)
+    job_update(jid, total=len(accounts), platform=platform)
+
+    if not cookies:
+        with jobs_lock:
+            jobs[jid]["errors"].append(
+                f"belum ada sesi login {platform} — fitur cek follow wajib "
+                f"cookie. Isi di Pengaturan → Sesi login.")
+        job_update(jid, status="done",
+                   result={"ok": 0, "fail": len(accounts),
+                           "error": f"belum ada sesi login {platform}"})
+        return
+
+    # Label akun admin (opsional — kalau gagal, cek follow tetap jalan).
+    admin = scrape.fetch_instagram_self(cookies)
+    if admin:
+        db.set_setting("follow_admin_" + platform, admin.get("username") or "")
+        job_update(jid, admin=admin)
+
+    ok = fail = 0
+    streak = 0
+
+    def simpan(acc_id, tid, fs, prof, err):
+        """Simpan hasil satu akun — TIDAK BOLEH mematikan job.
+
+        Akun bisa terhapus dari UI saat job masih berjalan; saat itu baris
+        follow_status melanggar FOREIGN KEY. Dulu itu melempar dari dalam
+        blok `except`, sehingga thread job mati diam-diam dan job tidak
+        pernah selesai (ditemukan lewat tes 2026-10-19).
+        """
+        try:
+            db.save_follow_status(
+                acc_id, platform, tid,
+                (fs or {}).get("following"), (fs or {}).get("followed_by"),
+                (fs or {}).get("outgoing_request"),
+                (fs or {}).get("incoming_request"),
+                (fs or {}).get("is_private"), err,
+                follower_count=(prof or {}).get("follower_count"),
+                following_count=(prof or {}).get("following_count"))
+        except sqlite3.IntegrityError:
+            pass          # akun sudah dihapus -> tidak ada yang perlu disimpan
+        except Exception as e:  # noqa: BLE001
+            with jobs_lock:
+                jobs[jid]["errors"].append(
+                    f"gagal menyimpan hasil @{acc_id}: {str(e)[:80]}")
+
+    for acc in accounts:
+        berhenti = False
+        try:
+            polite_wait(platform)
+            prof = scrape.fetch_instagram_profile(acc["username"], cookies)
+            tid = prof.get("id")
+            if not tid:
+                raise scrape.ScrapeFailed("id profil tidak ditemukan",
+                                          retryable=False)
+            polite_wait(platform)
+            fs = scrape.fetch_instagram_friendship(tid, cookies)
+            simpan(acc["id"], tid, fs, prof, None)
+            ok += 1
+            streak = 0
+        except Exception as e:  # noqa: BLE001 - status dicatat per akun
+            fail += 1
+            msg = str(e)[:200]
+            simpan(acc["id"], None, None, None, msg)
+            with jobs_lock:
+                jobs[jid]["errors"].append(f"@{acc['username']}: {msg[:90]}")
+            if _looks_like_auth_problem(msg):
+                streak += 1
+                if streak >= 3:
+                    with jobs_lock:
+                        jobs[jid]["errors"].append(
+                            f"[{platform}] Sesi login bermasalah — sisa akun "
+                            f"dilewati. Isi ulang cookie di Pengaturan lalu "
+                            f"jalankan cek follow lagi.")
+                        jobs[jid]["auth_stopped"] = platform
+                    berhenti = True
+            else:
+                streak = 0
+        # Penghitung diperbarui SEBELUM break supaya progress di UI tidak
+        # tertinggal (dulu akun terakhir yang memicu stop tidak terhitung).
+        with jobs_lock:
+            jobs[jid]["done"] += 1
+            jobs[jid]["ok"] = ok
+            jobs[jid]["fail"] = fail
+        if berhenti:
+            break
+        time.sleep(delay)
+
+    job_update(jid, status="done",
+               result={"ok": ok, "fail": fail, "platform": platform,
+                       "admin": admin})
 
 
 # ---------------- background: scrape banyak link ----------------
@@ -758,6 +865,23 @@ class Handler(BaseHTTPRequestHandler):
                                      args=(jid, "instagram", limit), daemon=True)
                 t.start()
                 self.send_json({"ok": True, "job_id": jid})
+            elif p == "/api/follow/check":
+                b = self.read_json()
+                plat = (b.get("platform") or "instagram").strip().lower()
+                if plat not in FOLLOW_PLATFORMS:
+                    return self.send_json(
+                        {"error": "cek follow saat ini hanya untuk Instagram "
+                                  "(butuh sesi login)"}, 400)
+                if not session.get_stored(plat):
+                    return self.send_json(
+                        {"error": f"belum ada sesi login {plat}. Cek follow "
+                                  f"wajib cookie — isi di Pengaturan → "
+                                  f"Sesi login."}, 400)
+                jid = new_job("follow_check", 0)
+                t = threading.Thread(target=follow_check_job,
+                                     args=(jid, plat), daemon=True)
+                t.start()
+                self.send_json({"ok": True, "job_id": jid, "platform": plat})
             elif p == "/api/sessions":
                 b = self.read_json()
                 plat = (b.get("platform") or "").strip().lower()
@@ -874,6 +998,14 @@ class Handler(BaseHTTPRequestHandler):
             sampai = g("sampai") or default_week()[1]
             self.send_json({"points": db.trend(
                 sejak, sampai, g("platform") or None)})
+        elif p == "/api/follow":
+            plat = g("platform") or "instagram"
+            self.send_json({
+                "platform": plat,
+                "admin": db.get_setting("follow_admin_" + plat, "") or "",
+                "sesi_aktif": bool(session.get_stored(plat)),
+                "ringkasan": db.follow_counts(plat),
+                "rows": db.list_follow_status(plat)})
         elif p == "/api/counts":
             self.send_json(db.count_accounts())
         elif p == "/api/posts/count":

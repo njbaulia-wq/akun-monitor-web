@@ -30,6 +30,10 @@
       <button class="nav-btn" data-view="akun">
         <span class="ico">◉</span> Akun
       </button>
+      <button class="nav-btn" data-view="follow">
+        <span class="ico">⇄</span> Cek Follow
+        <span class="nav-hint">IG · butuh sesi</span>
+      </button>
       <button class="nav-btn" data-view="data">
         <span class="ico">␥</span> Kelola Data
         <span class="nav-hint">hapus / reset scrape</span>
@@ -300,6 +304,69 @@
           <thead><tr><th>Waktu scrape</th><th class="num">Views</th><th class="num">Δ Views</th><th class="num">Like</th><th class="num">Komen</th><th class="num">Share</th><th class="num">Repost</th></tr></thead>
           <tbody></tbody>
         </table></div>
+      </div>
+    </section>
+
+    <!-- CEK FOLLOW -->
+    <section class="view" id="view-follow">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Cek Follow <span class="pill" id="followCount"></span></h2>
+            <p class="muted">Cek apakah <b>akun admin</b> (yang cookie-nya
+            tersimpan di Pengaturan) sudah follow tiap akun di daftar, dan
+            apakah akun itu <b>follow balik</b>.</p>
+          </div>
+          <div class="row" style="margin:0">
+            <button class="btn primary" id="btnCekFollow">⇄ Cek follow sekarang</button>
+            <button class="btn ghost" id="btnMuatFollow">⟳ Muat</button>
+          </div>
+        </div>
+        <div class="warnbox" id="followWarn" hidden>
+          <b>⚠ Sesi Instagram belum ada</b>
+          <span>Cek follow wajib cookie — Instagram tidak menyediakan data ini
+          tanpa login.</span>
+          <a class="btn small" href="#" data-goto="pengaturan">Buka Pengaturan</a>
+        </div>
+        <p class="muted small" id="followAdmin" style="margin:0 0 10px"></p>
+        <div class="stats" id="followStats"></div>
+        <div class="progress" id="followProg" hidden>
+          <div class="bar"><div id="followBar"></div></div>
+          <div class="muted small" id="followTxt" style="margin-top:6px"></div>
+        </div>
+        <div class="row gap hasil-tools">
+          <input type="search" id="cariFollow" placeholder="🔍 Cari username / kode…">
+          <select id="filterFollow">
+            <option value="">Semua status</option>
+            <option value="mutual">✅ Saling follow</option>
+            <option value="following">→ Admin follow, belum balik</option>
+            <option value="followed_by">← Mereka follow, admin belum</option>
+            <option value="none">✖ Belum saling follow</option>
+            <option value="pending">⏳ Menunggu izin (akun privat)</option>
+            <option value="error">❌ Gagal dicek</option>
+            <option value="unchecked">◦ Belum dicek</option>
+          </select>
+          <span class="muted small" id="followFilterInfo"></span>
+        </div>
+        <div class="table-wrap" style="margin-top:10px">
+          <table id="tblFollow">
+            <thead><tr>
+              <th>Kode</th><th>Username</th>
+              <th class="num">Pengikut</th><th class="num">Diikuti</th>
+              <th>Status</th><th>Privat</th><th>Dicek</th><th>Catatan</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="empty" id="followEmpty" hidden>Belum ada hasil. Klik
+        “Cek follow sekarang”.</div>
+        <p class="muted small" style="margin-top:10px">
+          ⚠ Ini memakai jalur API privat Instagram, bukan API resmi — di luar
+          ToS Instagram dan berisiko membuat <b>akun admin</b> kena
+          rate-limit/pembatasan. Jeda sopan tetap dipakai. Relasi hanya bisa
+          dibaca <b>relatif terhadap akun admin</b>; untuk “akun A follow akun
+          B” dibutuhkan cookie akun A.
+        </p>
       </div>
     </section>
 

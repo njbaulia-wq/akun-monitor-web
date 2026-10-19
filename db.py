@@ -13,6 +13,8 @@ import datetime
 import sqlite3
 import threading
 
+import wibtime as wib
+
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "data", "pantauakun.db")
 
@@ -52,6 +54,25 @@ CREATE TABLE IF NOT EXISTS metrics (
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
+);
+-- Status follow (relasi tiap akun terhadap akun PEMILIK SESI / admin).
+-- Instagram tidak mengekspos relasi follow secara publik, jadi tabel ini
+-- hanya terisi kalau cookie sesi Instagram diisi (lihat scrape.py).
+CREATE TABLE IF NOT EXISTS follow_status (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL UNIQUE
+        REFERENCES accounts(id) ON DELETE CASCADE,
+    platform TEXT NOT NULL,
+    target_user_id TEXT,
+    following INTEGER,          -- 1 akun admin sudah follow target
+    followed_by INTEGER,        -- 1 target follow balik akun admin
+    outgoing_request INTEGER,   -- permintaan follow masih menunggu
+    incoming_request INTEGER,   -- target minta follow admin
+    is_private INTEGER,
+    follower_count INTEGER,
+    following_count INTEGER,
+    error TEXT,                 -- terisi kalau gagal dicek
+    checked_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_posts_account ON posts(account_id);
 CREATE INDEX IF NOT EXISTS idx_posts_date ON posts(posted_at);
@@ -346,18 +367,116 @@ def count_posts(scope, platform=None, account_id=None, sejak=None, sampai=None):
     n_metrics = q(
         f"SELECT COUNT(*) c FROM metrics WHERE post_id IN "
         f"(SELECT id FROM posts WHERE {w})", a, one=True)["c"]
-    return {"posts": n_posts, "metrics": n_metrics}
+    out = {"posts": n_posts, "metrics": n_metrics}
+    # 'all' = seluruh data hasil scrape, jadi hasil cek follow ikut dihitung
+    # supaya jumlah di dialog konfirmasi tidak menyesatkan.
+    if scope == "all":
+        out["follows"] = (q("SELECT COUNT(*) c FROM follow_status WHERE "
+                            "checked_at IS NOT NULL", one=True)["c"]
+                          if not platform else
+                          q("SELECT COUNT(*) c FROM follow_status WHERE "
+                            "platform=?", (platform,), one=True)["c"])
+    return out
 
 
 def delete_posts(scope, platform=None, account_id=None, sejak=None, sampai=None):
     """Hapus posting + metrik sesuai cakupan. AKUN TIDAK IKUT TERHAPUS.
 
     Metrik hilang otomatis lewat ON DELETE CASCADE.
+    scope='all' juga mengosongkan hasil cek follow (itu data hasil scrape).
     """
     w, a = _scope_where(scope, platform, account_id, sejak, sampai)
     n = count_posts(scope, platform, account_id, sejak, sampai)
     run(f"DELETE FROM posts WHERE {w}", a)
+    if scope == "all":
+        clear_follow_status(platform)
     return n
+
+
+# ---------------- status follow (relasi vs akun sesi/admin) ----------------
+
+def save_follow_status(account_id, platform, target_user_id, following,
+                       followed_by, outgoing_request=None,
+                       incoming_request=None, is_private=None, error=None,
+                       follower_count=None, following_count=None):
+    """Simpan hasil cek follow satu akun (upsert: 1 baris per akun).
+
+    Boolean disimpan sebagai 0/1; None tetap None (Instagram tidak mengirim
+    field itu) supaya UI bisa membedakan "tidak" dari "tidak diketahui".
+    checked_at memakai WIB, konsisten dengan posted_at.
+    """
+    b = lambda v: None if v is None else (1 if v else 0)  # noqa: E731
+    return run(
+        "INSERT INTO follow_status(account_id, platform, target_user_id,"
+        " following, followed_by, outgoing_request, incoming_request,"
+        " is_private, follower_count, following_count, error, checked_at)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(account_id) DO UPDATE SET"
+        " platform=excluded.platform, target_user_id=excluded.target_user_id,"
+        " following=excluded.following, followed_by=excluded.followed_by,"
+        " outgoing_request=excluded.outgoing_request,"
+        " incoming_request=excluded.incoming_request,"
+        " is_private=excluded.is_private,"
+        " follower_count=excluded.follower_count,"
+        " following_count=excluded.following_count, error=excluded.error,"
+        " checked_at=excluded.checked_at",
+        (account_id, platform, target_user_id, b(following), b(followed_by),
+         b(outgoing_request), b(incoming_request), b(is_private),
+         follower_count, following_count, error,
+         wib.now_wib().strftime("%Y-%m-%d %H:%M:%S")))
+
+
+def list_follow_status(platform=None):
+    """Semua akun + status follow-nya (LEFT JOIN).
+
+    LEFT JOIN dipakai supaya akun yang BELUM pernah dicek tetap muncul
+    sebagai baris dengan checked_at NULL — bukan hilang dari tabel.
+    """
+    where = "WHERE a.platform=?" if platform else ""
+    args = (platform,) if platform else ()
+    return q(f"""
+        SELECT a.id AS account_id, a.kode, a.platform, a.username,
+               f.target_user_id, f.following, f.followed_by,
+               f.outgoing_request, f.incoming_request, f.is_private,
+               f.follower_count, f.following_count, f.error, f.checked_at
+        FROM accounts a
+        LEFT JOIN follow_status f ON f.account_id = a.id
+        {where}
+        ORDER BY a.kode, a.username
+    """, args)
+
+
+def follow_counts(platform="instagram"):
+    """Ringkasan: berapa akun yang sudah dicek & status dominannya."""
+    rows = list_follow_status(platform)
+    n = {"total": len(rows), "checked": 0, "mutual": 0, "following": 0,
+         "followed_by": 0, "none": 0, "pending": 0, "error": 0, "unchecked": 0}
+    for r in rows:
+        if r["error"]:
+            n["error"] += 1
+            continue
+        if not r["checked_at"]:
+            n["unchecked"] += 1
+            continue
+        n["checked"] += 1
+        if r["outgoing_request"]:
+            n["pending"] += 1
+        elif r["following"] and r["followed_by"]:
+            n["mutual"] += 1
+        elif r["following"]:
+            n["following"] += 1
+        elif r["followed_by"]:
+            n["followed_by"] += 1
+        else:
+            n["none"] += 1
+    return n
+
+
+def clear_follow_status(platform=None):
+    """Hapus hasil cek follow (akun tetap)."""
+    if platform:
+        return run("DELETE FROM follow_status WHERE platform=?", (platform,))
+    return run("DELETE FROM follow_status")
 
 
 def post_history(post_id):

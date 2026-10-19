@@ -42,6 +42,7 @@ $$(".nav-btn").forEach((b) =>
     $("#view-" + b.dataset.view).classList.add("active");
     if (b.dataset.view === "dashboard") loadDashboard();
     if (b.dataset.view === "akun") loadAkun();
+    if (b.dataset.view === "follow") loadFollow();
     if (b.dataset.view === "pengaturan") loadSettings();
     if (b.dataset.view === "data") loadDataStat();
     closeNav();
@@ -774,9 +775,15 @@ async function doDelete(scope, platform, sejak, sampai, accountId) {
   const body = { scope, platform, sejak, sampai, account_id: accountId };
   const n = await api("/api/posts/count", { method: "POST", body: JSON.stringify(body) });
   const label = SCOPE_LABEL[scope] || scope;
-  if (!n.posts) { toast("Tidak ada data untuk dihapus."); return; }
+  const nFollow = n.follows || 0;
+  // 'all' juga mengosongkan hasil cek follow, jadi tetap lanjut walau
+  // postingnya sudah kosong tapi hasil cek follow masih ada.
+  if (!n.posts && !(scope === "all" && nFollow)) {
+    toast("Tidak ada data untuk dihapus."); return;
+  }
   const extra = scope === "all"
-    ? "\n\n⚠ INI MENGHAPUS SEMUA DATA. Backup akan dibuat otomatis."
+    ? `\n\n⚠ INI MENGHAPUS SEMUA DATA. Backup akan dibuat otomatis.` +
+      (nFollow ? `\n${nFollow} hasil cek follow ikut dikosongkan.` : "")
     : `\n\n${n.metrics} baris metrik ikut terhapus.`;
   if (!confirm(`Hapus ${label}?\n\n${n.posts} Posting · ${n.metrics} metrik.${extra}`))
     return;
@@ -1143,6 +1150,129 @@ $("#btnThreads").addEventListener("click", async () => {
       loadDashboard();
     }
   }, 2000);
+});
+
+/* ---------- cek follow (relasi vs akun admin) ----------
+   Fitur ini memakai jalur API privat Instagram, jadi butuh cookie sesi.
+   Status dihitung dari baris follow_status (lihat db.py):
+     pending  -> permintaan follow masih menunggu (target privat)
+     mutual   -> admin follow DAN target follow balik
+     following-> admin sudah follow, target belum balik
+     followed_by -> target follow admin, admin belum follow
+     none     -> tidak saling follow
+     error    -> gagal dicek (sesi/limit/akun hilang)              */
+let FOLLOW = [];
+
+function followStatus(r) {
+  if (r.error) return "error";
+  if (!r.checked_at) return "unchecked";
+  if (r.outgoing_request) return "pending";
+  if (r.following && r.followed_by) return "mutual";
+  if (r.following) return "following";
+  if (r.followed_by) return "followed_by";
+  return "none";
+}
+
+const FOLLOW_LABEL = {
+  mutual: ['ok', '✅ Saling follow'],
+  following: ['ok', '→ Admin follow, belum balik'],
+  followed_by: ['warn', '← Mereka follow, admin belum'],
+  none: ['warn', '✖ Belum saling follow'],
+  pending: ['warn', '⏳ Menunggu izin (privat)'],
+  error: ['err', '❌ Gagal dicek'],
+  unchecked: ['', '◦ Belum dicek'],
+};
+
+function renderFollow() {
+  const term = ($("#cariFollow").value || "").toLowerCase();
+  const f = $("#filterFollow").value;
+  const rows = FOLLOW.filter((r) => {
+    if (f && followStatus(r) !== f) return false;
+    if (!term) return true;
+    return (`${r.kode || ""} ${r.username || ""}`).toLowerCase().includes(term);
+  });
+  const tb = $("#tblFollow tbody");
+  tb.innerHTML = "";
+  rows.forEach((r) => {
+    const st = followStatus(r);
+    const [cls, label] = FOLLOW_LABEL[st] || ['', st];
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${r.kode ?? ""}</td>` +
+      `<td>${r.username || ""}</td>` +
+      `<td class="num">${fmt(r.follower_count)}</td>` +
+      `<td class="num">${fmt(r.following_count)}</td>` +
+      `<td><span class="st ${cls}">${label}</span></td>` +
+      `<td>${r.is_private ? "ya" : (r.checked_at ? "tidak" : "")}</td>` +
+      `<td class="small">${r.checked_at || "—"}</td>` +
+      `<td class="small" title="${(r.error || "").replace(/"/g, "&quot;")}">` +
+      `${(r.error || "").slice(0, 70)}</td>`;
+    tb.appendChild(tr);
+  });
+  $("#followEmpty").hidden = rows.length > 0;
+  $("#followFilterInfo").textContent = `${rows.length}/${FOLLOW.length} akun`;
+}
+
+function renderFollowStats(k) {
+  const items = [
+    ["Total akun", k.total], ["Sudah dicek", k.checked],
+    ["Saling follow", k.mutual], ["Admin follow", k.following],
+    ["Mereka follow", k.followed_by], ["Belum saling", k.none],
+    ["Menunggu izin", k.pending], ["Gagal", k.error],
+    ["Belum dicek", k.unchecked],
+  ];
+  $("#followStats").innerHTML = items.map(([k2, v]) =>
+    `<div class="stat"><div class="k">${k2}</div><div class="v">${fmt(v)}</div></div>`
+  ).join("");
+}
+
+async function loadFollow() {
+  const d = await api("/api/follow?platform=instagram").catch(() => null);
+  if (!d) return;
+  FOLLOW = d.rows || [];
+  $("#followCount").textContent = `${FOLLOW.length} akun`;
+  $("#followAdmin").textContent = d.admin
+    ? `Dicek relatif terhadap akun admin: @${d.admin}`
+    : "Akun admin belum terbaca (jalankan cek follow sekali).";
+  $("#followWarn").hidden = !!d.sesi_aktif;
+  renderFollowStats(d.ringkasan || {});
+  renderFollow();
+}
+
+$("#btnMuatFollow")?.addEventListener("click", loadFollow);
+["cariFollow", "filterFollow"].forEach((id) =>
+  $("#" + id)?.addEventListener("input", renderFollow));
+
+$("#btnCekFollow")?.addEventListener("click", async () => {
+  const btn = $("#btnCekFollow");
+  btn.disabled = true;
+  try {
+    const { job_id } = await api("/api/follow/check", {
+      method: "POST", body: JSON.stringify({ platform: "instagram" }),
+    });
+    $("#followProg").hidden = false;
+    const poll = setInterval(async () => {
+      const j = await api("/api/jobs/" + job_id).catch(() => null);
+      if (!j) return;
+      const pct = j.total ? Math.round((100 * j.done) / j.total) : 0;
+      $("#followBar").style.width = pct + "%";
+      const admin = (j.admin && j.admin.username) ? ` (@${j.admin.username})` : "";
+      $("#followTxt").textContent =
+        `${j.done}/${j.total} akun${admin} — ok ${j.ok}, gagal ${j.fail}`;
+      if (j.status === "done") {
+        clearInterval(poll);
+        btn.disabled = false;
+        const err = j.result && j.result.error;
+        if (err) toast("❌ " + err);
+        else toast(`Selesai: ${j.ok} akun dicek, ${j.fail} gagal.`);
+        if (j.auth_stopped) toast("⚠ Sesi Instagram bermasalah — isi ulang cookie.");
+        loadFollow();
+      }
+    }, 2000);
+  } catch (e) {
+    btn.disabled = false;
+    toast("❌ " + e.message);
+  }
 });
 
 /* ---------- topbar ---------- */
